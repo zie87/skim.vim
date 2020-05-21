@@ -78,7 +78,7 @@ endfunction
 function! fzf#vim#with_preview(...)
   " Default options
   let options = {}
-  let window = 'right'
+  let window = ''
 
   let args = copy(a:000)
 
@@ -87,6 +87,9 @@ function! fzf#vim#with_preview(...)
     let options = copy(args[0])
     call remove(args, 0)
   endif
+
+  " Placeholder expression (TODO/TBD: undocumented)
+  let placeholder = get(options, 'placeholder', '{}')
 
   " Preview window
   if len(args) && type(args[0]) == s:TYPE.string
@@ -97,7 +100,11 @@ function! fzf#vim#with_preview(...)
     call remove(args, 0)
   endif
 
-  let preview = ['--preview-window', window, '--preview', (s:is_win ? s:bin.preview : skim#shellescape(s:bin.preview)).' {}']
+  let preview = []
+  if len(window)
+    let preview += ['--preview-window', window]
+  endif
+  let preview += ['--preview', (s:is_win ? s:bin.preview : skim#shellescape(s:bin.preview)).' '.placeholder]
 
   if len(args)
     call extend(preview, ['--bind', join(map(args, 'v:val.":toggle-preview"'), ',')])
@@ -112,6 +119,14 @@ function! s:remove_layout(opts)
       call remove(a:opts, key)
     endif
   endfor
+  return a:opts
+endfunction
+
+function! s:reverse_list(opts)
+  let tokens = map(split($FZF_DEFAULT_OPTS, '[^a-z-]'), 'substitute(v:val, "^--", "", "")')
+  if index(tokens, 'reverse') < 0
+    return extend(['--layout=reverse-list'], a:opts)
+  endif
   return a:opts
 endfunction
 
@@ -454,7 +469,7 @@ endfunction
 " ------------------------------------------------------------------
 " History[:/]
 " ------------------------------------------------------------------
-function! s:all_files()
+function! fzf#vim#_recent_files()
   return fzf#vim#_uniq(map(
     \ filter([expand('%')], 'len(v:val)')
     \   + filter(map(s:buflisted_sorted(), 'bufname(v:val)'), 'len(v:val)')
@@ -519,7 +534,7 @@ endfunction
 
 function! fzf#vim#history(...)
   return s:fzf('history-files', {
-  \ 'source':  s:all_files(),
+  \ 'source':  fzf#vim#_recent_files(),
   \ 'options': ['-m', '--header-lines', !empty(expand('%')), '--prompt', 'Hist> ']
   \}, a:000)
 endfunction
@@ -608,13 +623,15 @@ endfunction
 
 function! s:format_buffer(b)
   let name = bufname(a:b)
+  let line = exists('*getbufinfo') ? getbufinfo(a:b)[0]['lnum'] : 0
   let name = empty(name) ? '[No Name]' : fnamemodify(name, ":p:~:.")
   let flag = a:b == bufnr('')  ? s:blue('%', 'Conditional') :
           \ (a:b == bufnr('#') ? s:magenta('#', 'Special') : ' ')
   let modified = getbufvar(a:b, '&modified') ? s:red(' [+]', 'Exception') : ''
   let readonly = getbufvar(a:b, '&modifiable') ? '' : s:green(' [RO]', 'Constant')
   let extra = join(filter([modified, readonly], '!empty(v:val)'), '')
-  return s:strip(printf("[%s] %s\t%s\t%s", s:yellow(a:b, 'Number'), flag, name, extra))
+  let target = line == 0 ? name : name.':'.line
+  return s:strip(printf("%s\t[%s] %s\t%s\t%s", target, s:yellow(a:b, 'Number'), flag, name, extra))
 endfunction
 
 function! s:sort_buffers(...)
@@ -640,23 +657,23 @@ endfunction
 " ------------------------------------------------------------------
 " Ag / Rg
 " ------------------------------------------------------------------
-function! s:ag_to_qf(line, with_column)
-  let parts = split(a:line, ':')
-  let text = join(parts[(a:with_column ? 3 : 2):], ':')
+function! s:ag_to_qf(line, has_column)
+  let parts = split(a:line, '[^:]\zs:\ze[^:]')
+  let text = join(parts[(a:has_column ? 3 : 2):], ':')
   let dict = {'filename': &acd ? fnamemodify(parts[0], ':p') : parts[0], 'lnum': parts[1], 'text': text}
-  if a:with_column
+  if a:has_column
     let dict.col = parts[2]
   endif
   return dict
 endfunction
 
-function! s:ag_handler(lines, with_column)
+function! s:ag_handler(lines, has_column)
   if len(a:lines) < 2
     return
   endif
 
   let cmd = s:action_for(a:lines[0], 'e')
-  let list = map(filter(a:lines[1:], 'len(v:val)'), 's:ag_to_qf(v:val, a:with_column)')
+  let list = map(filter(a:lines[1:], 'len(v:val)'), 's:ag_to_qf(v:val, a:has_column)')
   if empty(list)
     return
   endif
@@ -665,7 +682,7 @@ function! s:ag_handler(lines, with_column)
   try
     call s:open(cmd, first.filename)
     execute first.lnum
-    if a:with_column
+    if a:has_column
       execute 'normal!' first.col.'|'
     endif
     normal! zz
@@ -733,8 +750,8 @@ function! fzf#vim#ag_raw(command_suffix, ...)
   return call('fzf#vim#grep', extend(['ag --nogroup --column --color '.a:command_suffix, 1], a:000))
 endfunction
 
-" command, with_column, [options]
-function! fzf#vim#grep(grep_command, with_column, ...)
+" command (string), has_column (0/1), [options (dict)], [fullscreen (0/1)]
+function! fzf#vim#grep(grep_command, has_column, ...)
   let words = []
   for word in split(a:grep_command)
     if word !~# '^[a-z]'
@@ -746,8 +763,7 @@ function! fzf#vim#grep(grep_command, with_column, ...)
   let name    = join(words, '-')
   let capname = join(map(words, 'toupper(v:val[0]).v:val[1:]'), '')
   let opts = {
-  \ 'source':  a:grep_command,
-  \ 'column':  a:with_column,
+  \ 'column':  a:has_column,
   \ 'options': ['--ansi', '--prompt', capname.'> ',
   \             '--multi', '--bind', 'alt-a:select-all,alt-d:deselect-all',
   \             '--color', 'hl:4,hl+:12']
@@ -756,7 +772,13 @@ function! fzf#vim#grep(grep_command, with_column, ...)
     return s:ag_handler(a:lines, self.column)
   endfunction
   let opts['sink*'] = remove(opts, 'sink')
-  return s:fzf(name, opts, a:000)
+  try
+    let prev_default_command = $FZF_DEFAULT_COMMAND
+    let $FZF_DEFAULT_COMMAND = a:grep_command
+    return s:fzf(name, opts, a:000)
+  finally
+    let $FZF_DEFAULT_COMMAND = prev_default_command
+  endtry
 endfunction
 
 " ------------------------------------------------------------------
@@ -815,7 +837,7 @@ function! fzf#vim#buffer_tags(query, ...)
     return s:fzf('btags', {
     \ 'source':  s:btags_source(tag_cmds),
     \ 'sink*':   s:function('s:btags_sink'),
-    \ 'options': ['--layout=reverse-list', '-m', '-d', '\t', '--with-nth', '1,4..', '-n', '1', '--prompt', 'BTags> ', '--query', a:query]}, args)
+    \ 'options': s:reverse_list(['-m', '-d', '\t', '--with-nth', '1,4..', '-n', '1', '--prompt', 'BTags> ', '--query', a:query])}, args)
   catch
     return s:warn(v:exception)
   endtry
@@ -1160,10 +1182,10 @@ function! s:commits(buffer_local, args)
   let options = {
   \ 'source':  source,
   \ 'sink*':   s:function('s:commits_sink'),
-  \ 'options': ['--ansi', '--multi', '--tiebreak=index', '--layout=reverse-list',
+  \ 'options': s:reverse_list(['--ansi', '--multi', '--tiebreak=index',
   \   '--inline-info', '--prompt', command.'> ', '--bind=ctrl-s:toggle-sort',
   \   '--header', ':: Press '.s:magenta('CTRL-S', 'Special').' to toggle sort, '.s:magenta('CTRL-Y', 'Special').' to yank commit hashes',
-  \   '--expect=ctrl-y,'.expect_keys]
+  \   '--expect=ctrl-y,'.expect_keys])
   \ }
 
   if a:buffer_local
@@ -1230,7 +1252,7 @@ function! fzf#vim#maps(mode, ...)
   let curr = ''
   for line in split(cout, "\n")
     if line =~ "^\t"
-      let src = '  '.join(reverse(reverse(split(split(line)[-1], '/'))[0:2]), '/')
+      let src = "\t".substitute(matchstr(line, '/\zs[^/\\]*\ze$'), ' [^ ]* ', ':', '')
       call add(list, printf('%s %s', curr, s:green(src, 'Comment')))
       let curr = ''
     else
